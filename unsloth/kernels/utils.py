@@ -1083,8 +1083,10 @@ def matmul_lora(X, W, W_quant, A, B, s, out = None):
     if A is not None:
         # LoRA is enabled
         A, B = A.t(), B.t()
-        XA = torch_matmul(X, A.to(dtype))
-        out.addmm_(XA, B.to(dtype), alpha = s)
+        # Patch: cast LoRA A/B to OUT dtype to avoid Half/BFloat16 mismatch with vLLM colocate.
+        _odt = out.dtype
+        XA = torch_matmul(X, A.to(_odt))
+        out.addmm_(XA, B.to(_odt), alpha = s)
         # out += (X @ A.to(dtype)) @ (s * B.to(dtype))
 
     return out.view(batch, seq_len, -1) if reshape else out

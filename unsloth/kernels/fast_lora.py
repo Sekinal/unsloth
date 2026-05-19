@@ -169,39 +169,37 @@ class LoRA_MLP(torch.autograd.Function):
         # d_downB = (downA.t() @ h.t()) @ dY
         # d_downA *= downS
         # d_downB *= downS
-        d_downA.addmm_(h.t(), dY @ downB.t(), alpha = downS, beta = 0)
-        d_downB.addmm_(downA.t() @ h.t(), dY, alpha = downS, beta = 0)
+        # Patch: cast RHS to LHS dtype to avoid Float/Half mismatch (vLLM colocate dtype mismatch fix)
+        _d_dA_dt = d_downA.dtype; _d_dB_dt = d_downB.dtype
+        _d_uA_dt = d_upA.dtype;   _d_uB_dt = d_upB.dtype
+        _d_gA_dt = d_gateA.dtype; _d_gB_dt = d_gateB.dtype
+        d_downA.addmm_(h.t().to(_d_dA_dt), (dY @ downB.t()).to(_d_dA_dt), alpha = downS, beta = 0)
+        d_downB.addmm_((downA.t() @ h.t()).to(_d_dB_dt), dY.to(_d_dB_dt), alpha = downS, beta = 0)
 
         # Up projection LoRA weights
-        # d_upA   = X.t() @ (df @ upB.t())
-        # d_upB   = (upA.t() @ X.t()) @ df
-        # d_upA  *= upS
-        # d_upB  *= upS
-        d_upA.addmm_(X.t(), df @ upB.t(), alpha = upS, beta = 0)
-        d_upB.addmm_(upA.t() @ X.t(), df, alpha = upS, beta = 0)
+        d_upA.addmm_(X.t().to(_d_uA_dt), (df @ upB.t()).to(_d_uA_dt), alpha = upS, beta = 0)
+        d_upB.addmm_((upA.t() @ X.t()).to(_d_uB_dt), df.to(_d_uB_dt), alpha = upS, beta = 0)
 
         # Gate projection LoRA weights
-        # d_gateA = X.t() @ (de @ gateB.t())
-        # d_gateB = (gateA.t() @ X.t()) @ de
-        # d_gateA *= gateS
-        # d_gateB *= gateS
-        d_gateA.addmm_(X.t(), de @ gateB.t(), alpha = gateS, beta = 0)
-        d_gateB.addmm_(gateA.t() @ X.t(), de, alpha = gateS, beta = 0)
+        d_gateA.addmm_(X.t().to(_d_gA_dt), (de @ gateB.t()).to(_d_gA_dt), alpha = gateS, beta = 0)
+        d_gateB.addmm_((gateA.t() @ X.t()).to(_d_gB_dt), de.to(_d_gB_dt), alpha = gateS, beta = 0)
 
         # dX  = matmul_lora(df, upW.t(), upW_quant, upB, upA, upS)
         # dX += matmul_lora(de, gateW.t(), gateW_quant, gateB, gateA, gateS)
         upW = fast_dequantize(upW.t(), upW_quant)
-        dX = torch.matmul(df, upW.t(), out = X if ctx.inplace else None)
+        # Patch: skip inplace out=X when dtype mismatches (vLLM colocate)
+        _out_arg = X if (ctx.inplace and X is not None and X.dtype == df.dtype) else None
+        dX = torch.matmul(df, upW.t(), out = _out_arg)
         del upW
         # dX += df @ upB.to(dtype).t() @ (upS * upA.to(dtype).t())
-        dX.addmm_(df @ upB.t(), upA.t(), alpha = upS)
+        dX.addmm_((df @ upB.t()).to(dX.dtype), upA.t().to(dX.dtype), alpha = upS)
 
         gateW = fast_dequantize(gateW.t(), gateW_quant)
         # dX += de @ gateW.t()
-        dX.addmm_(de, gateW.t())
+        dX.addmm_(de.to(dX.dtype), gateW.t().to(dX.dtype))
         del gateW
         # dX += de @ gateB.to(dtype).t() @ (gateS * gateA.to(dtype).t())
-        dX.addmm_(de @ gateB.t(), gateA.t(), alpha = gateS)
+        dX.addmm_((de @ gateB.t()).to(dX.dtype), gateA.t().to(dX.dtype), alpha = gateS)
 
         # gateW, gateW_quant, gateA, gateB, gateS,
         #  upW,    upW_quant,   upA,   upB,   upS,
@@ -465,48 +463,54 @@ class LoRA_QKV(torch.autograd.Function):
         # d_QB = (QA.t() @ X.t()) @ dQ
         # d_QA *= QS
         # d_QB *= QS
-        d_QA.addmm_(X.t(), dQ @ QB.t(), alpha = QS, beta = 0)
-        d_QB.addmm_(QA.t() @ X.t(), dQ, alpha = QS, beta = 0)
+        # Patch: cast RHS to LHS dtype (vLLM colocate dtype mismatch fix)
+        _dQA_dt = d_QA.dtype; _dQB_dt = d_QB.dtype
+        d_QA.addmm_(X.t().to(_dQA_dt), (dQ @ QB.t()).to(_dQA_dt), alpha = QS, beta = 0)
+        d_QB.addmm_((QA.t() @ X.t()).to(_dQB_dt), dQ.to(_dQB_dt), alpha = QS, beta = 0)
 
         # K Projection
         # d_KA = X.t() @ (dK @ KB.t())
         # d_KB = (KA.t() @ X.t()) @ dK
         # d_KA *= KS
         # d_KB *= KS
-        d_KA.addmm_(X.t(), dK @ KB.t(), alpha = KS, beta = 0)
-        d_KB.addmm_(KA.t() @ X.t(), dK, alpha = KS, beta = 0)
+        _dKA_dt = d_KA.dtype; _dKB_dt = d_KB.dtype
+        d_KA.addmm_(X.t().to(_dKA_dt), (dK @ KB.t()).to(_dKA_dt), alpha = KS, beta = 0)
+        d_KB.addmm_((KA.t() @ X.t()).to(_dKB_dt), dK.to(_dKB_dt), alpha = KS, beta = 0)
 
         # V Projection
         # d_VA = X.t() @ (dV @ VB.t())
         # d_VB = (VA.t() @ X.t()) @ dV
         # d_VA *= VS
         # d_VB *= VS
-        d_VA.addmm_(X.t(), dV @ VB.t(), alpha = VS, beta = 0)
-        d_VB.addmm_(VA.t() @ X.t(), dV, alpha = VS, beta = 0)
+        _dVA_dt = d_VA.dtype; _dVB_dt = d_VB.dtype
+        d_VA.addmm_(X.t().to(_dVA_dt), (dV @ VB.t()).to(_dVA_dt), alpha = VS, beta = 0)
+        d_VB.addmm_((VA.t() @ X.t()).to(_dVB_dt), dV.to(_dVB_dt), alpha = VS, beta = 0)
 
         # Combine derivatives to find dX
         # dQ
         QW = fast_dequantize(QW.t(), QW_quant)
-        dX = torch.matmul(dQ, QW.t(), out = X if ctx.inplace else None)
+        # Patch: skip inplace out=X when dtype mismatches (vLLM colocate)
+        _out_arg = X if (ctx.inplace and X is not None and X.dtype == dQ.dtype) else None
+        dX = torch.matmul(dQ, QW.t(), out = _out_arg)
         del QW
         # dX += (dQ @ QB.to(dtype).t() @ (QS * QA.to(dtype).t()))
-        dX.addmm_(dQ @ QB.t(), QA.t(), alpha = QS)
+        dX.addmm_((dQ @ QB.t()).to(dX.dtype), QA.t().to(dX.dtype), alpha = QS)
 
         # dK
         KW = fast_dequantize(KW.t(), KW_quant)
         # dX += dK @ KW.t()
-        dX.addmm_(dK, KW.t())
+        dX.addmm_(dK.to(dX.dtype), KW.t().to(dX.dtype))
         del KW
         # dX += dK @ KB.to(dtype).t() @ (KS * KA.to(dtype).t())
-        dX.addmm_(dK @ KB.t(), KA.t(), alpha = KS)
+        dX.addmm_((dK @ KB.t()).to(dX.dtype), KA.t().to(dX.dtype), alpha = KS)
 
         # dV
         VW = fast_dequantize(VW.t(), VW_quant)
         # dX += dV @ VW.t()
-        dX.addmm_(dV, VW.t())
+        dX.addmm_(dV.to(dX.dtype), VW.t().to(dX.dtype))
         del VW
         # dX += dV @ VB.to(dtype).t() @ (VS * VA.to(dtype).t())
-        dX.addmm_(dV @ VB.t(), VA.t(), alpha = VS)
+        dX.addmm_((dV @ VB.t()).to(dX.dtype), VA.t().to(dX.dtype), alpha = VS)
 
         # QW, QW_quant, QA, QB, QS,
         # KW, KW_quant, KA, KB, KS,

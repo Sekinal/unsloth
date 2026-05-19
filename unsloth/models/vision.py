@@ -245,6 +245,7 @@ VLLM_SUPPORTED_VLM = [
     "mistral3",
     "qwen3_vl",
     "qwen3_vl_moe",
+    "qwen3_5",  # Patch: add Qwen3.5 (LM under siglip wrapper)
 ]
 VLLM_NON_LORA_VLM = [
     "mllama",
